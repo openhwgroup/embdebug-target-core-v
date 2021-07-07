@@ -1,0 +1,8 @@
+# compiled binaries
+*.o
+testbench.exe
+# Logs and traces
+*.log
+*.vcd
+# Memory initialization directory
+mem_init
