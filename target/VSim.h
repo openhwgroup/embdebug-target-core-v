@@ -9,9 +9,19 @@
 #define VSIM_H
 
 #include "verilated.h"
+#if defined(CV_MODEL_X_HEEP)
+#include <verilated_fst_c.h>
+#elif defined(CV_MODEL_MCU)
 #include <verilated_vcd_c.h>
+#else
+#error "Must specify which CORE-V Verilator model to use"
+#endif
 
+#if defined(CV_MODEL_X_HEEP)
+#include "Vtestharness.h"
+#elif defined(CV_MODEL_MCU)
 #include "Vcore_v_mcu.h"
+#endif
 
 /// \brief A class to wrap a Verilator simulation of a processor.
 ///
@@ -57,10 +67,18 @@ private:
   bool mHaveVcd;
 
   /// \brief Verilator dump state
+#if defined(CV_MODEL_X_HEEP)
+  std::unique_ptr<VerilatedFstC> mTfp;
+#elif defined(CV_MODEL_MCU)
   std::unique_ptr<VerilatedVcdC> mTfp;
+#endif
 
   /// \brief Verilator model
+#if defined(CV_MODEL_X_HEEP)
+  std::unique_ptr<Vtestharness> mCpu;
+#elif defined(CV_MODEL_MCU)
   std::unique_ptr<Vcore_v_mcu> mCpu;
+#endif
 
   /// \brief Half period of the main clock in ticks
   vluint64_t mClkHalfPeriodTicks;

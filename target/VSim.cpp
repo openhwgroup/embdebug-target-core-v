@@ -27,7 +27,17 @@ VSim::VSim (const vluint64_t clkPeriodNs, const vluint64_t simTimeNs,
             const char *vcdFile)
 {
   mContextp.reset (new VerilatedContext);
+#if defined(CV_MODEL_X_HEEP)
+  // For X-Heep we have to give some dummy arguments to be ignored
+  const char * argv [] = {"embdebug"};
+  int argc = 1;
+  mContextp->commandArgs (argc, argv);
+  // Create a new target
+  mCpu.reset (new Vtestharness);
+#elif defined(CV_MODEL_MCU)
+  // Create a new target
   mCpu.reset (new Vcore_v_mcu);
+#endif
 
   // Set up simulation context with 1ns ticks
   mContextp->timeunit (9);
@@ -40,8 +50,12 @@ VSim::VSim (const vluint64_t clkPeriodNs, const vluint64_t simTimeNs,
 
   if (mHaveVcd)
     {
-      Verilated::traceEverOn (true);
+      mContextp->traceEverOn (true);
+#if defined(CV_MODEL_X_HEEP)
+      mTfp.reset (new VerilatedFstC);
+#elif defined(CV_MODEL_MCU)
       mTfp.reset (new VerilatedVcdC);
+#endif
       mCpu->trace (mTfp.get (), 99);
       mTfp->set_time_unit ("1ns");
       mTfp->set_time_resolution ("1ns");
@@ -62,11 +76,19 @@ VSim::VSim (const vluint64_t clkPeriodNs, const vluint64_t simTimeNs,
 
   vluint8_t nResetBit = mTickCount < mResetPeriodTicks ? 0 : 1;
   mContextp->time (mTickCount);
-  mCpu->ref_clk_i = 1U;
+#if defined(CV_MODEL_X_HEEP)
+  mCpu->clk_i = 1U;
+  mCpu->rst_ni = nResetBit;
+
+  mCpu->jtag_trst_ni = nResetBit;
+#elif defined(CV_MODEL_MCU)
   mCpu->rstn_i = nResetBit;
+  mCpu->ref_clk_i = 1U;
+
+  mCpu->jtag_trst_i = nResetBit;
+#endif
 
   mCpu->jtag_tck_i = 1U;
-  mCpu->jtag_trst_i = nResetBit;
   mTckPosedge = true;
   mTckNegedge = false;
 }
@@ -124,11 +146,19 @@ VSim::advanceHalfPeriod ()
   vluint8_t old_tck = mCpu->jtag_tck_i;
   vluint8_t nResetBit = mTickCount < mResetPeriodTicks ? 0 : 1;
 
+#if defined(CV_MODEL_X_HEEP)
+  mCpu->clk_i = 1U - (mTickCount / mClkHalfPeriodTicks) % 2;
+  mCpu->rst_ni = nResetBit;
+
+  mCpu->jtag_trst_ni = nResetBit;
+#elif defined(CV_MODEL_MCU)
   mCpu->ref_clk_i = 1U - (mTickCount / mClkHalfPeriodTicks) % 2;
   mCpu->rstn_i = nResetBit;
 
-  mCpu->jtag_tck_i = 1U - (mTickCount / mTckHalfPeriodTicks) % 2;
   mCpu->jtag_trst_i = nResetBit;
+#endif
+
+  mCpu->jtag_tck_i = 1U - (mTickCount / mTckHalfPeriodTicks) % 2;
 
   mTckPosedge = (old_tck == 0U) && (mCpu->jtag_tck_i == 1U);
   mTckNegedge = (old_tck == 1U) && (mCpu->jtag_tck_i == 0U);
