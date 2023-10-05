@@ -10,42 +10,27 @@
 #include "embdebug/Compat.h"
 #include "embdebug/ITarget.h"
 
+#include <cstring>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <sstream>
+#include <unistd.h>
 
 using namespace EmbDebug;
 
-using namespace std;
+//using namespace std;
+using std::endl;
+using std::string;
+using std::unique_ptr;
 
-#define CV32E40_TARGET_DEBUG 1
-
-/* This bit mask corresponds to the step field of the dcsr register. */
-#define MASK_DCSR_STEP (1 << 2)
-
-/* This bit mask corresponds to the ebreakm, ebreaks, and ebreaku fields of the
- * dcsr register */
-#define MASK_DCSR_EBREAK_FIELDS ((1 << 15) | (1 << 13) | (1 << 12))
-
-/* This bit mask corresponds to the cause field of the dcsr register. */
-#define MASK_DCSR_CAUSE_FIELD 0x000001C0
-
-/* This is the bit index where the cause field of the dcsr register begins. */
-#define DCSR_CAUSE_FIELD_START 6
-
-/* This is the value the cause field will be set to if an ebreak instruction was
- * executed. */
-#define DCSR_CAUSE_EBREAK_EXECUTED 1
-
-/* Each register has its own unique number identifier, this is the identifier
- * for PC */
-#define REG_PC_IDENTIFIER 0x20
-
-/* This bit mask corresponds to the field for the first hart in haltsum. */
-#define MASK_HALTSUM_FIRST_HART 1
-
-// Instantiate the model. TODO the argument will change to pass in the
-// residual argv.
-Cv32e40::Cv32e40 (const TraceFlags *traceFlags) : ITarget (traceFlags)
+/// Instantiate the target.
+///
+/// \todo the argument will change to pass in the residual argv.
+///
+/// \param[in] traceFlags  Trace flags from the generic server
+Cv32e40::Cv32e40 (const TraceFlags *traceFlags) :
+  ITarget (traceFlags), mXmlTdesc (nullptr)
 {
   // We create the DTM here, because only at this level do we know what
   // derived class we will instantiate.  But we then pass ownership to the
@@ -75,6 +60,10 @@ Cv32e40::Cv32e40 (const TraceFlags *traceFlags) : ITarget (traceFlags)
 Cv32e40::~Cv32e40 ()
 {
   mDmi.reset (nullptr);
+
+  if (mXmlTdesc != nullptr)
+    delete [] mXmlTdesc;
+
   return;
 }
 
@@ -110,7 +99,7 @@ Cv32e40::getInstrCount () const
 int
 Cv32e40::getRegisterCount () const
 {
-  return 32;
+  return REG_CSR0_GDBNUM;		// Exclude the CSRs for now
 }
 
 // How big is each register in bytes
@@ -126,18 +115,32 @@ std::size_t
 Cv32e40::readRegister (const int reg, uint_reg_t &value)
 {
   std::size_t retval = getRegisterSize ();
-
   uint32_t readvalue; // Need a temp store since we can't pass value.
-  if (reg == REG_PC_IDENTIFIER)
-    {
-      mDmi->readCsr (Dmi::Csr::DPC, readvalue);
-    }
-  else
+
+  if ((reg >= REG_ZERO_GDBNUM) && (reg < REG_PC_GDBNUM))
     {
       mDmi->readGpr (reg, readvalue);
     }
-  value = readvalue;
+  else if (reg == REG_PC_GDBNUM)
+    {
+      mDmi->readCsr (Dmi::Csr::DPC, readvalue);
+    }
+  else if ((reg >= REG_FT0_GDBNUM) && (reg < REG_CSR0_GDBNUM))
+    {
+      mDmi->readFpr (reg, readvalue);
+    }
+  else if ((reg >= REG_CSR0_GDBNUM) && (reg <= REG_CSR_LAST_GDBNUM))
+    {
+      mDmi->readCsr (static_cast<uint16_t> (reg - REG_CSR0_GDBNUM), readvalue);
+    }
+  else
+    {
+      // Error condition, read no bytes
+      readvalue = 0;
+      retval = 0;
+    }
 
+  value = readvalue;
   return retval;
 }
 
@@ -174,14 +177,29 @@ std::size_t
 Cv32e40::writeRegister (const int reg, const uint_reg_t value)
 {
   std::size_t retval = getRegisterSize ();
-  if (reg == REG_PC_IDENTIFIER)
-    { // Special case for pc as it is a CSR not GPR
-      mDmi->writeCsr (Dmi::Csr::DPC, value);
-    }
-  else
+
+  if ((reg >= REG_ZERO_GDBNUM) && (reg < REG_PC_GDBNUM))
     {
       mDmi->writeGpr (reg, value);
     }
+  else if (reg == REG_PC_GDBNUM)
+    {
+      mDmi->writeCsr (Dmi::Csr::DPC, value);
+    }
+  else if ((reg >= REG_FT0_GDBNUM) && (reg < REG_CSR0_GDBNUM))
+    {
+      mDmi->writeFpr (reg, value);
+    }
+  else if ((reg >= REG_CSR0_GDBNUM) && (reg <= REG_CSR_LAST_GDBNUM))
+    {
+      mDmi->writeCsr (static_cast<uint16_t> (reg - REG_CSR0_GDBNUM), value);
+    }
+  else
+    {
+      // Error condition, wrote no bytes
+      retval = 0;
+    }
+
   return retval;
 }
 
@@ -319,7 +337,7 @@ Cv32e40::resume (void)
       uint32_t dbg_ctrl_val;
       retval &= mDmi->readCsr (Dmi::Csr::DCSR, dbg_ctrl_val)
                 == Dmi::Abstractcs::CmderrVal::CMDERR_NONE;
-      dbg_ctrl_val |= MASK_DCSR_STEP;
+      dbg_ctrl_val |= DCSR_STEP;
       retval &= mDmi->writeCsr (Dmi::Csr::DCSR, dbg_ctrl_val)
                 == Dmi::Abstractcs::CmderrVal::CMDERR_NONE;
     }
@@ -329,7 +347,7 @@ Cv32e40::resume (void)
       uint32_t dbg_ctrl_val;
       retval &= mDmi->readCsr (Dmi::Csr::DCSR, dbg_ctrl_val)
                 == Dmi::Abstractcs::CmderrVal::CMDERR_NONE;
-      dbg_ctrl_val |= MASK_DCSR_EBREAK_FIELDS;
+      dbg_ctrl_val |= DCSR_EBREAKS;
       retval &= mDmi->writeCsr (Dmi::Csr::DCSR, dbg_ctrl_val)
                 == Dmi::Abstractcs::CmderrVal::CMDERR_NONE;
     }
@@ -389,6 +407,106 @@ Cv32e40::halt (void)
   return retval;
 }
 
+/// Whether file supports XML target description
+///
+/// \return \c true, becauset his target does support XML target description.
+bool
+Cv32e40::supportsTargetXML (void)
+{
+  return true;
+}
+
+/// Return the target description as an XML string
+///
+/// We construct this dynamically as a string, for ease of adding in the
+/// CSRs. It also makes things more readable! However the underling
+/// string_buffer associated with ostringstream is not that large, so we have
+/// to build it in bits into a string.
+const char *
+Cv32e40::getTargetXML (ByteView name)
+{
+  // If we have already constructed this, just return it.
+  if (mXmlTdesc != nullptr)
+    return mXmlTdesc;
+
+  // Construct the XML
+  string s;				// The string we are building
+  std::ostringstream oss;
+
+  // Header
+  oss << "<?xml version=\"1.0\"?>" << endl;
+  oss << "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">" << endl;
+  oss << "<target version=\"1.0\">" << endl;
+  oss << "  <architecture>riscv:rv32</architecture>" << endl;
+  s.append (oss.str ());
+  oss.str ("");
+
+  // General registers
+  oss << "  <feature name=\"org.gnu.gdb.riscv.cpu\">" << endl;
+  s.append (oss.str ());
+  oss.str ("");
+
+  for (uint16_t r = REG_ZERO_GDBNUM; r < REG_FT0_GDBNUM; r++) {
+    oss << "    <reg name=\"" << mGenRegMap[r].name
+	<< "\" bitsize=\"32\" type=\"" << mGenRegMap[r].type
+	<< "\" regnum=\"" << r << "\"/>" << endl;
+    s.append (oss.str ());
+    oss.str ("");
+  }
+
+  oss << "  </feature>" << endl;
+  s.append (oss.str ());
+  oss.str ("");
+
+  // Floating point registers
+  oss << "  <feature name=\"org.gnu.gdb.riscv.fpu\">" << endl;
+  s.append (oss.str ());
+  oss.str ("");
+
+  for (uint16_t r = REG_FT0_GDBNUM; r < REG_CSR0_GDBNUM; r++) {
+    oss << "    <reg name=\"" << mFpRegMap[r].name
+	<< "\" bitsize=\"32\" type=\"" << mFpRegMap[r].type
+	<< "\" regnum=\"" << r << "\" group=\"float\"/>" << endl;
+    s.append (oss.str ());
+    oss.str ("");
+  }
+
+  oss << "  </feature>" << endl;
+  s.append (oss.str ());
+  oss.str ("");
+
+  // CSRs.  Not all CSRs are defined, but we enumerate them in order.
+  oss << "  <feature name=\"org.gnu.gdb.riscv.csr\">" << endl;
+  s.append (oss.str ());
+  oss.str ("");
+
+  for (uint16_t r = REG_CSR0_GDBNUM; r <= REG_CSR_LAST_GDBNUM; r++) {
+    const uint16_t csr = r - REG_CSR0_GDBNUM;
+    const char * csrn = mDmi->csrName(csr);
+    if (strcmp (csrn, "UNKNOWN") != 0) {
+      oss << "    <reg name=\"" << csrn
+	  << "\" bitsize=\"32\" type=\"uint32\" save-restore=\"no\" regnum=\""
+	  << r << "\" group=\"csr\"/>" << endl;
+      s.append (oss.str ());
+      oss.str ("");
+    }
+  }
+
+  oss << "  </feature>" << endl;
+  s.append (oss.str ());
+  oss.str ("");
+
+  // Footer
+  oss << "</target>" << endl;
+  s.append (oss.str ());
+  oss.str ("");
+
+  // Now we can preserve the string and return it
+  mXmlTdesc = new char [s.size() + 1];
+  strcpy (mXmlTdesc, s.c_str());
+  return mXmlTdesc;
+}
+
 ITarget::WaitRes
 Cv32e40::stepInstr (ITarget::ResumeRes &resumeRes)
 {
@@ -400,7 +518,7 @@ Cv32e40::stepInstr (ITarget::ResumeRes &resumeRes)
       mDmi->haltsum ()->read (0);
       haltsum_val = mDmi->haltsum ()->haltsum (0);
       /* If hart 1 is halted, break */
-      if (haltsum_val & MASK_HALTSUM_FIRST_HART)
+      if (haltsum_val & HALTSUM_FIRST_HART)
         {
           resumeRes = ITarget::ResumeRes::INTERRUPTED;
           break;
@@ -409,7 +527,7 @@ Cv32e40::stepInstr (ITarget::ResumeRes &resumeRes)
   /* Unset the step field. */
   uint32_t dcsr_val;
   mDmi->readCsr (Dmi::Csr::DCSR, dcsr_val);
-  dcsr_val &= ~MASK_DCSR_STEP;
+  dcsr_val &= ~DCSR_STEP;
   mDmi->writeCsr (Dmi::Csr::DCSR, dcsr_val);
 
   return retval;
@@ -430,7 +548,7 @@ Cv32e40::runToBreak (ITarget::ResumeRes &resumeRes)
   /* Unset the ebreak fields. */
   uint32_t dcsr_val;
   mDmi->readCsr (Dmi::Csr::DCSR, dcsr_val);
-  dcsr_val &= ~MASK_DCSR_EBREAK_FIELDS;
+  dcsr_val &= ~DCSR_EBREAKS;
   mDmi->writeCsr (Dmi::Csr::DCSR, dcsr_val);
 
   return retval;
@@ -446,16 +564,13 @@ Cv32e40::stoppedAtEbreak ()
       mDmi->haltsum ()->read (0);
       haltsum_val = mDmi->haltsum ()->haltsum (0);
       /* If hart 1 is halted, break */
-      if (haltsum_val & MASK_HALTSUM_FIRST_HART)
+      if (haltsum_val & HALTSUM_FIRST_HART)
         break;
     }
   /* Check if we stopped because of an ebreak */
   uint32_t dcsr_val;
   mDmi->readCsr (Dmi::Csr::DCSR, dcsr_val);
-  bool stoppedAtEbreak
-      = ((dcsr_val & MASK_DCSR_CAUSE_FIELD) >> DCSR_CAUSE_FIELD_START)
-        == DCSR_CAUSE_EBREAK_EXECUTED;
-  return stoppedAtEbreak;
+  return (dcsr_val & DCSR_CAUSE) == DCSR_CAUSE_EBREAK_EXECUTED;
 }
 
 // Entry point for the shared library

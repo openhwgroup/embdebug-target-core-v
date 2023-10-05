@@ -81,15 +81,34 @@ if(NOT VERILATOR_INCLUDE_DIR)
   endif()
 endif()
 
-include_directories(${VERILATOR_INCLUDE_DIR})
+include_directories(${VERILATOR_INCLUDE_DIR} ${VERILATOR_INCLUDE_DIR}/vltstd)
+
+# What model to use
+option(CV_MODEL "Verilator model type for CORE-V")
+if(NOT CV_MODEL)
+  message(FATAL_ERROR "No CORE-V model specified")
+elseif(CV_MODEL STREQUAL "X-HEEP")
+  add_compile_definitions(CV_MODEL_X_HEEP)
+elseif(CV_MODEL STREQUAL "MCU")
+  add_compile_definitions(CV_MODEL_MCU)
+else()
+  message(FATAL_ERROR "Invalid CORE-V model specified ${CV_MODEL}")
+endif()
+
+# Have to build Verilator models with -fPIC
+add_compile_options("-fPIC")
+add_link_options("-lz")
 
 # If these files aren't specified as GENERATED at this level then cmake tries
 # to find them at configure time before they have been generated.
-set(CV32E40_EMBDEBUG_TARGET_SRCS target/Cv32e40.cpp target/Args.cpp target/DtmJtag.cpp target/Tap.cpp target/VSim.cpp target/Dmi.cpp target/Utils.cpp ${VERILATOR_INCLUDE_DIR}/verilated.cpp ${VERILATOR_INCLUDE_DIR}/verilated_vcd_c.cpp)
+set(CV32E40_EMBDEBUG_TARGET_SRCS target/Cv32e40.cpp target/Args.cpp target/DtmJtag.cpp target/Tap.cpp target/VSim.cpp target/Dmi.cpp target/Utils.cpp ${VERILATOR_INCLUDE_DIR}/verilated.cpp ${VERILATOR_INCLUDE_DIR}/verilated_vcd_c.cpp ${VERILATOR_INCLUDE_DIR}/verilated_fst_c.cpp)
 
 add_library(embdebug-target-cv32e40 SHARED ${CV32E40_EMBDEBUG_TARGET_SRCS})
-
-target_link_libraries(embdebug-target-cv32e40 ${CV_MCU_BUILD_DIR}/Vcore_v_mcu__ALL.a)
+if(CV_MODEL STREQUAL "X-HEEP")
+  target_link_libraries(embdebug-target-cv32e40 ${CV_MCU_BUILD_DIR}/Vtestharness__ALL.a ${CV_MCU_BUILD_DIR}/libsupport.a)
+elseif(CV_MODEL STREQUAL "MCU")
+  target_link_libraries(embdebug-target-cv32e40 ${CV_MCU_BUILD_DIR}/Vcore_v_mcu__ALL.a)
+endif()
 
 set_target_properties(embdebug-target-cv32e40 PROPERTIES
                       VERSION ${cv32e40_embdebug_target_VERSION}
@@ -105,5 +124,6 @@ message("
   C++ Compiler.................: " ${CMAKE_CXX_COMPILER} "
   cxx-opts.....................: " ${CXXOPTS_INCLUDE_DIR} "
   EmbDebug include directory...: " ${EMBDEBUG_INCLUDE_DIR} "
+  CORE-V model.................: " ${CV_MODEL} "
   Verilator include directory..: " ${VERILATOR_INCLUDE_DIR} "
   ")
